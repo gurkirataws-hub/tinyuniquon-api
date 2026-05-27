@@ -1,92 +1,88 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List
+import gspread
+from google.oauth2.service_account import Credentials
+import json
+import os
 import random
 from datetime import datetime
 
 app = FastAPI(title="TinyUniquon Logic API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-
-# ============================================
-# 1. VALIDATE & FILTER INVENTORY
-# Bot gets raw inventory from Pluggy → sends here → gets filtered result
-# ============================================
-class InventoryItem(BaseModel):
-    Gender: str
-    Age: str
-    Design: str
-    Quantity: int
-
-class InventoryRequest(BaseModel):
-    gender: str
-    age: str
-    inventory: List[InventoryItem]
-
-@app.post("/api/filter-inventory")
-def filter_inventory(req: InventoryRequest):
-    if req.gender not in ("Boys", "Girls"):
-        raise HTTPException(400, "gender must be 'Boys' or 'Girls'")
-    if req.age not in ("2-4 years", "4-6 years"):
-        raise HTTPException(400, "age must be '2-4 years' or '4-6 years'")
-
-    available = [
-        {"design": item.Design, "quantity": item.Quantity}
-        for item in req.inventory
-        if item.Gender == req.gender and item.Age == req.age and item.Quantity > 0
-    ]
-
-    return {
-        "gender": req.gender,
-        "age": req.age,
-        "available": available,
-        "totalDesigns": len(available),
-    }
+SPREADSHEET_ID = "1ZizjWpqeX42mKarIIzM2JkqHqjQxbNV1nhdRNYxzeRQ"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
-# ============================================
-# 2. VALIDATE ORDER & GENERATE ORDER NUMBER
-# Bot collects all info → sends here → gets validated order ready for Pluggy to write
-# ============================================
-class OrderRequest(BaseModel):
-    customerName: str = Field(..., min_length=2)
-    phone: str
-    design: str
-    quantity: int
-    availableStock: int
-    address: str = Field(..., min_length=5)
-    city: str = Field(..., min_length=2)
-    pincode: str
+def get_sheet_client():
+    creds_json = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+    creds = Credentials.from_service_account_info(creds_json, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    return client.open_by_key(SPREADSHEET_ID)
+
 
 @app.post("/api/validate-order")
-def validate_order(order: OrderRequest):
+def validate_order(order: dict):
+    customerName = order.get("customerName", "")
+    phone = order.get("phone", "")
+    design = order.get("design", "")
+    quantity = int(order.get("quantity", 0))
+    availableStock = int(order.get("availableStock", 0))
+    address = order.get("address", "")
+    city = order.get("city", "")
+    pincode = order.get("pincode", "")
+
     errors = []
 
-    # Phone validation
-    if len(order.phone) != 10 or not order.phone.isdigit() or order.phone[0] not in "6789":
+    if len(customerName) < 2:
+        errors.append("Name too short.")
+    if len(phone) != 10 or not phone.isdigit() or phone[0] not in "6789":
         errors.append("Invalid phone number. Must be 10 digits starting with 6/7/8/9.")
-
-    # Pincode validation
-    if len(order.pincode) != 6 or not order.pincode.isdigit() or order.pincode[0] == "0":
+    if len(pincode) != 6 or not pincode.isdigit() or pincode[0] == "0":
         errors.append("Invalid pincode. Must be 6 digits.")
-
-    # Quantity validation
-    if order.quantity <= 0 or order.quantity > 10:
+    if quantity <= 0 or quantity > 10:
         errors.append("Quantity must be between 1 and 10.")
-
-    if order.quantity > order.availableStock:
-        errors.append(f"Only {order.availableStock} in stock. Reduce quantity.")
+    if quantity > availableStock:
+        errors.append(f"Only {availableStock} in stock. Reduce quantity.")
+    if len(address) < 5:
+        errors.append("Address too short.")
+    if len(city) < 2:
+        errors.append("City too short.")
 
     if errors:
         return {"valid": False, "errors": errors}
 
-    # All good — generate order
-    price = order.quantity * 500
+    price = quantity * 500
     order_number = f"TU{random.randint(10000, 99999)}"
     order_date = datetime.now().strftime("%Y-%m-%d")
+    new_stock = availableStock - quantity
 
-    new_stock = order.availableStock - order.quantity
+    try:
+        spreadsheet = get_sheet_client()
+
+        # Write to Shipping details
+        ship_sheet = spreadsheet.worksheet("Shipping details")
+        ship_sheet.append_row([
+            order_number, order_date, customerName, phone,
+            quantity, price, address, city, pincode
+        ])
+
+        # Write to Order detail
+        detail_sheet = spreadsheet.worksheet("Order detail")
+        detail_sheet.append_row([phone, order_number, order_date, "Open"])
+
+        # Update inventory
+        inv_sheet = spreadsheet.worksheet("Inventory")
+        inv_rows = inv_sheet.get_all_records()
+        for i, r in enumerate(inv_rows):
+            if r["Design"] == design:
+                inv_sheet.update_cell(i + 2, 4, new_stock)
+                break
+
+    except Exception as e:
+        return {"valid": True, "orderNumber": order_number, "orderDate": order_date, "price": price, "newStock": new_stock, "sheetError": str(e)}
 
     return {
         "valid": True,
@@ -94,64 +90,53 @@ def validate_order(order: OrderRequest):
         "orderDate": order_date,
         "price": price,
         "newStock": new_stock,
-        "shippingData": {
-            "Order number": order_number,
-            "Order date": order_date,
-            "Name": order.customerName,
-            "Phone number": order.phone,
-            "Quantity": order.quantity,
-            "Price": price,
-            "Address": order.address,
-            "City": order.city,
-            "Pincode": order.pincode,
-        },
-        "orderDetailData": {
-            "Customer Name": order.phone,
-            "Order Id": order_number,
-            "Order Date": order_date,
-            "Order Status": "Open",
-        },
+        "sheetUpdated": True,
     }
 
-
-# ============================================
-# 3. COMPUTE ORDER STATUS
-# Bot gets raw order rows from Pluggy → sends here → gets computed status
-# Priority: Open > Partially processed > Completed
-# ============================================
-class OrderRow(BaseModel):
-    OrderStatus: str
-
-class TrackRequest(BaseModel):
-    orderId: str
-    rows: List[OrderRow]
 
 @app.post("/api/compute-status")
-def compute_status(req: TrackRequest):
-    if not req.rows:
-        return {"orderId": req.orderId, "overallStatus": "not_found"}
+def compute_status(req: dict):
+    orderId = req.get("orderId", "")
+    phone = req.get("phone", "")
 
-    statuses = [r.OrderStatus.strip() for r in req.rows]
+    try:
+        spreadsheet = get_sheet_client()
+        sheet = spreadsheet.worksheet("Order detail")
+        rows = sheet.get_all_records()
 
-    if "Open" in statuses:
-        overall = "Open"
-    elif "Partially processed" in statuses:
-        overall = "Partially processed"
-    elif all(s == "Completed" for s in statuses):
-        overall = "Completed"
-    else:
-        overall = "Open"
+        matching = [
+            r for r in rows
+            if str(r.get("Order Id", "")).strip() == str(orderId).strip()
+            and str(r.get("Customer Name", "")).strip() == str(phone).strip()
+        ]
 
-    return {
-        "orderId": req.orderId,
-        "totalItems": len(statuses),
-        "breakdown": {
-            "open": statuses.count("Open"),
-            "partiallyProcessed": statuses.count("Partially processed"),
-            "completed": statuses.count("Completed"),
-        },
-        "overallStatus": overall,
-    }
+        if not matching:
+            return {"orderId": orderId, "overallStatus": "not_found"}
+
+        statuses = [r.get("Order Status", "").strip() for r in matching]
+
+        if "Open" in statuses:
+            overall = "Open"
+        elif "Partially processed" in statuses:
+            overall = "Partially processed"
+        elif all(s == "Completed" for s in statuses):
+            overall = "Completed"
+        else:
+            overall = "Open"
+
+        return {
+            "orderId": orderId,
+            "totalItems": len(statuses),
+            "breakdown": {
+                "open": statuses.count("Open"),
+                "partiallyProcessed": statuses.count("Partially processed"),
+                "completed": statuses.count("Completed"),
+            },
+            "overallStatus": overall,
+        }
+
+    except Exception as e:
+        return {"orderId": orderId, "overallStatus": "error", "error": str(e)}
 
 
 @app.get("/health")
