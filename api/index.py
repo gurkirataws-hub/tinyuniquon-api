@@ -86,11 +86,14 @@ def validate_order(order: OrderRequest):
     order_number = f"TU{random.randint(10000, 99999)}"
     order_date = datetime.now().strftime("%Y-%m-%d")
 
+    new_stock = order.availableStock - order.quantity
+
     return {
         "valid": True,
         "orderNumber": order_number,
         "orderDate": order_date,
         "price": price,
+        "newStock": new_stock,
         "shippingData": {
             "Order number": order_number,
             "Order date": order_date,
