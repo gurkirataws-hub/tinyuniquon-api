@@ -1,7 +1,5 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import List
 import gspread
 from google.oauth2.service_account import Credentials
 import json
@@ -23,17 +21,17 @@ def get_sheet_client():
     return client.open_by_key(SPREADSHEET_ID)
 
 
-@app.post("/api/validate-order")
-def validate_order(order: dict):
-    customerName = order.get("customerName", "")
-    phone = order.get("phone", "")
-    design = order.get("design", "")
-    quantity = int(order.get("quantity", 0))
-    availableStock = int(order.get("availableStock", 0))
-    address = order.get("address", "")
-    city = order.get("city", "")
-    pincode = order.get("pincode", "")
-
+@app.get("/api/validate-order")
+def validate_order(
+    customerName: str = Query(...),
+    phone: str = Query(...),
+    design: str = Query(...),
+    quantity: int = Query(...),
+    availableStock: int = Query(...),
+    address: str = Query(...),
+    city: str = Query(...),
+    pincode: str = Query(...),
+):
     errors = []
 
     if len(customerName) < 2:
@@ -62,18 +60,15 @@ def validate_order(order: dict):
     try:
         spreadsheet = get_sheet_client()
 
-        # Write to Shipping details
         ship_sheet = spreadsheet.worksheet("Shipping details")
         ship_sheet.append_row([
             order_number, order_date, customerName, phone,
             quantity, price, address, city, pincode
         ])
 
-        # Write to Order detail
         detail_sheet = spreadsheet.worksheet("Order detail")
         detail_sheet.append_row([phone, order_number, order_date, "Open"])
 
-        # Update inventory
         inv_sheet = spreadsheet.worksheet("Inventory")
         inv_rows = inv_sheet.get_all_records()
         for i, r in enumerate(inv_rows):
@@ -94,11 +89,11 @@ def validate_order(order: dict):
     }
 
 
-@app.post("/api/compute-status")
-def compute_status(req: dict):
-    orderId = req.get("orderId", "")
-    phone = req.get("phone", "")
-
+@app.get("/api/compute-status")
+def compute_status(
+    orderId: str = Query(...),
+    phone: str = Query(...),
+):
     try:
         spreadsheet = get_sheet_client()
         sheet = spreadsheet.worksheet("Order detail")
