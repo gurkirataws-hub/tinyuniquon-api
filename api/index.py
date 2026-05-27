@@ -21,17 +21,37 @@ def get_sheet_client():
     return client.open_by_key(SPREADSHEET_ID)
 
 
+def read_order_detail(spreadsheet):
+    sheet = spreadsheet.worksheet("Order detail")
+    all_values = sheet.get_all_values()
+    rows = []
+    for row in all_values[1:]:
+        if len(row) >= 4 and row[0].strip():
+            rows.append({
+                "Customer Name": str(row[0]).strip(),
+                "Order Id": str(row[1]).strip(),
+                "Order Date": str(row[2]).strip(),
+                "Order Status": str(row[3]).strip(),
+            })
+    return rows
+
+
 @app.get("/api/validate-order")
 def validate_order(
     customerName: str = Query(...),
     phone: str = Query(...),
     design: str = Query(...),
-    quantity: int = Query(...),
-    availableStock: int = Query(...),
+    quantity: str = Query(...),
+    availableStock: str = Query(...),
     address: str = Query(...),
     city: str = Query(...),
     pincode: str = Query(...),
 ):
+    phone = str(phone).strip()
+    pincode = str(pincode).strip()
+    quantity = int(quantity)
+    availableStock = int(availableStock)
+
     errors = []
 
     if len(customerName) < 2:
@@ -96,19 +116,18 @@ def compute_status(
 ):
     try:
         spreadsheet = get_sheet_client()
-        sheet = spreadsheet.worksheet("Order detail")
-        rows = sheet.get_all_records()
+        rows = read_order_detail(spreadsheet)
 
         matching = [
             r for r in rows
-            if str(r.get("Order Id", "")).strip() == str(orderId).strip()
-            and str(r.get("Customer Name", "")).strip() == str(phone).strip()
+            if r["Order Id"] == str(orderId).strip()
+            and r["Customer Name"] == str(phone).strip()
         ]
 
         if not matching:
             return {"orderId": orderId, "overallStatus": "not_found"}
 
-        statuses = [r.get("Order Status", "").strip() for r in matching]
+        statuses = [r["Order Status"] for r in matching]
 
         if "Open" in statuses:
             overall = "Open"
